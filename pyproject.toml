@@ -1,0 +1,11 @@
+# pyproject.toml
+[project]
+name = "forex-arbitrage-spotter"
+version = "0.1.0"
+dependencies = [
+  "neo4j",
+  "requests",
+  "pandas",
+  "black",
+  "pytest",
+]
