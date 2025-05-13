@@ -1,28 +1,66 @@
-"""
-Currency Graph Builder
-
-This script:
-1. Fetches currency codes and exchange rates using the Frankfurter API.
-2. Loads Cypher queries from file.
-3. Connects to a Neo4j database.
-4. Creates currency nodes and exchange rate relationships in the graph.
-
-Author: Your Name
-"""
-
+from langchain_neo4j import Neo4jGraph, GraphCypherQAChain
+from langchain_openai import AzureChatOpenAI
+from langchain.prompts import PromptTemplate
 from neo4j import GraphDatabase, Transaction
 import requests
 import toml
 from typing import List, Dict, Any
 
 
-def get_currency_list() -> List[Dict[str, str]]:
-    """
-    Fetch a list of available currencies and their descriptions from the Frankfurter API.
+class CurrencyQAAgent:
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """Initializes the LangChain-powered Cypher QA agent."""
+        self.prompt_template = PromptTemplate(
+            input_variables=["question"],
+            template="""
+            # Please ALWAYS assign the exchange relationship to a variable (e.g., [r:EXCHANGE_TO])
+            # so that you can access properties like r.rate in the RETURN clause.
 
-    Returns:
-        A list of dictionaries, each with 'code' and 'description' keys.
-    """
+            # Examples
+            # Question: What is the exchange rate from USD to other currencies?
+            MATCH (c1:Currency {{code: 'USD'}})-[r:EXCHANGE_TO]->(c2:Currency)
+            RETURN c2.code, r.rate
+
+            # Question: Which currencies have the highest exchange rate from EUR?
+            MATCH (c1:Currency {{code: 'EUR'}})-[r:EXCHANGE_TO]->(c2:Currency)
+            RETURN c2.code, c2.description, r.rate
+            ORDER BY r.rate DESC
+
+            # Now answer this question:
+            Question: {question}
+            """
+        )
+
+        self.llm = AzureChatOpenAI(
+            openai_api_key=config["azure_openai"]["api_key"],
+            openai_api_version=config["azure_openai"]["api_version"],
+            azure_endpoint=config["azure_openai"]["endpoint"],
+            deployment_name=config["azure_openai"]["deployment_name"],
+            temperature=0
+        )
+
+        self.graph = Neo4jGraph(
+            url=config["neo4j"]["uri"],
+            username=config["neo4j"]["user"],
+            password=config["neo4j"]["password"]
+        )
+
+        self.chain = GraphCypherQAChain.from_llm(
+            graph=self.graph,
+            llm=self.llm,
+            cypher_prompt=self.prompt_template,
+            verbose=True,
+            allow_dangerous_requests=True
+        )
+
+    def ask(self, question: str) -> str:
+        """Runs the agent with a given question."""
+        return self.chain.invoke(question)
+
+
+# === Graph ETL Functions ===
+
+def get_currency_list() -> List[Dict[str, str]]:
     url = "https://api.frankfurter.app/currencies"
     try:
         response = requests.get(url)
@@ -35,15 +73,6 @@ def get_currency_list() -> List[Dict[str, str]]:
 
 
 def get_exchange_rates(base_currency: str = "EUR") -> Dict[str, Any]:
-    """
-    Get current exchange rates for a given base currency from the Frankfurter API.
-
-    Args:
-        base_currency: Currency code to use as the base (default is 'EUR').
-
-    Returns:
-        A dictionary containing the date, base currency, and a rates dictionary.
-    """
     url = f"https://api.frankfurter.app/latest?from={base_currency}"
     try:
         response = requests.get(url)
@@ -60,15 +89,6 @@ def get_exchange_rates(base_currency: str = "EUR") -> Dict[str, Any]:
 
 
 def load_cypher_query(filepath: str) -> str:
-    """
-    Load a Cypher query from a text file.
-
-    Args:
-        filepath: Path to the Cypher query file.
-
-    Returns:
-        The Cypher query as a string.
-    """
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             return f.read()
@@ -81,34 +101,14 @@ def load_cypher_query(filepath: str) -> str:
 
 
 class CurrencyGraph:
-    """
-    A class to manage creation of currency nodes and exchange rate relationships in Neo4j.
-    """
-
     def __init__(self, uri: str, user: str, password: str) -> None:
-        """
-        Initialize the CurrencyGraph instance and connect to Neo4j.
-
-        Args:
-            uri: Bolt URI of the Neo4j instance.
-            user: Neo4j username.
-            password: Neo4j password.
-        """
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
 
     def close(self) -> None:
-        """Close the Neo4j driver connection."""
         if self.driver:
             self.driver.close()
 
     def create_currency_nodes(self, currencies: List[Dict[str, str]], cypher_query: str) -> None:
-        """
-        Create currency nodes in the graph using a Cypher query.
-
-        Args:
-            currencies: List of currency dictionaries with 'code' and 'description'.
-            cypher_query: Cypher query for creating nodes.
-        """
         if not cypher_query:
             print("Cypher query is empty. Aborting node creation.")
             return
@@ -118,13 +118,6 @@ class CurrencyGraph:
                 session.execute_write(self._create_node, currency, cypher_query)
 
     def create_exchange_relationships(self, rates_data: Dict[str, Any], cypher_query: str) -> None:
-        """
-        Create exchange rate relationships from the given rates data.
-
-        Args:
-            rates_data: Dictionary with 'base', 'rates', and 'date'.
-            cypher_query: Cypher query for creating relationships.
-        """
         if not cypher_query or not rates_data:
             print("No data or query provided. Skipping relationship creation.")
             return
@@ -142,14 +135,6 @@ class CurrencyGraph:
 
     @staticmethod
     def _create_node(tx: Transaction, currency: Dict[str, str], query: str) -> None:
-        """
-        Transaction to create a single currency node.
-
-        Args:
-            tx: Active Neo4j transaction.
-            currency: Dictionary with 'code' and 'description'.
-            query: Cypher query for node creation.
-        """
         tx.run(query, code=currency["code"], description=currency["description"])
 
     @staticmethod
@@ -161,22 +146,12 @@ class CurrencyGraph:
         date: str,
         query: str
     ) -> None:
-        """
-        Transaction to create an exchange rate relationship.
-
-        Args:
-            tx: Active Neo4j transaction.
-            from_code: Source currency code.
-            to_code: Target currency code.
-            rate: Exchange rate.
-            date: Date of the rate.
-            query: Cypher query for relationship creation.
-        """
         tx.run(query, from_code=from_code, to_code=to_code, rate=rate, date=date)
 
 
-# === 5. Main Execution ===
+# === Main Execution ===
 if __name__ == "__main__":
+    config: Dict[str, Any] = toml.load("config.toml")
     currencies = get_currency_list()
     if not currencies:
         print("No currencies fetched. Exiting.")
@@ -188,27 +163,28 @@ if __name__ == "__main__":
         print("Failed to load Cypher queries. Exiting.")
         exit(1)
 
-    try:
-        config: Dict[str, Any] = toml.load("config.toml")
-        uri: str = config["neo4j"]["uri"]
-        user: str = config["neo4j"]["user"]
-        password: str = config["neo4j"]["password"]
-        graph = CurrencyGraph(uri, user, password)
+    uri: str = config["neo4j"]["uri"]
+    user: str = config["neo4j"]["user"]
+    password: str = config["neo4j"]["password"]
 
-        graph.create_currency_nodes(currencies, node_query)
-        print(f"Added {len(currencies)} currency nodes to Neo4j.")
+    graph = CurrencyGraph(uri, user, password)
+    graph.create_currency_nodes(currencies, node_query)
+    print(f"Added {len(currencies)} currency nodes to Neo4j.")
 
-        rates_dict: Dict[str, Dict[str, Any]] = {}
-        for currency in [c["code"] for c in currencies]:
-            rates = get_exchange_rates(currency)
-            if rates:
-                rates_dict[currency] = rates
+    rates_dict: Dict[str, Dict[str, Any]] = {}
+    for currency in [c["code"] for c in currencies]:
+        rates = get_exchange_rates(currency)
+        if rates:
+            rates_dict[currency] = rates
 
-        for base_currency, rates in rates_dict.items():
-            graph.create_exchange_relationships(rates, edge_query)
-            print(f"Added exchange rate relationships from {base_currency}.")
+    for base_currency, rates in rates_dict.items():
+        graph.create_exchange_relationships(rates, edge_query)
+        print(f"Added exchange rate relationships from {base_currency}.")
 
-    except Exception as e:
-        print(f"Error interacting with Neo4j: {e}")
-    finally:
-        graph.close()
+    graph.close()
+
+    # Run sample LangChain question
+    agent = CurrencyQAAgent(config)
+    question = input("Enter your question: ")
+    response = agent.ask(question)
+    print("Answer:", response)
