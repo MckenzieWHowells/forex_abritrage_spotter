@@ -1,6 +1,6 @@
 import toml
 import sys
-from currency_agent import CurrencyQAAgent
+from code.agent.currency_agent import CurrencyQAAgent
 
 def main():
     config = toml.load("config.toml")
