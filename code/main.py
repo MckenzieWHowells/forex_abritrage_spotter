@@ -7,6 +7,59 @@ import toml
 from typing import List, Dict, Any
 
 
+class CurrencyQAAgent:
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """Initializes the LangChain-powered Cypher QA agent."""
+        self.prompt_template = PromptTemplate(
+            input_variables=["question"],
+            template="""
+            # Please ALWAYS assign the exchange relationship to a variable (e.g., [r:EXCHANGE_TO])
+            # so that you can access properties like r.rate in the RETURN clause.
+
+            # Examples
+            # Question: What is the exchange rate from USD to other currencies?
+            MATCH (c1:Currency {{code: 'USD'}})-[r:EXCHANGE_TO]->(c2:Currency)
+            RETURN c2.code, r.rate
+
+            # Question: Which currencies have the highest exchange rate from EUR?
+            MATCH (c1:Currency {{code: 'EUR'}})-[r:EXCHANGE_TO]->(c2:Currency)
+            RETURN c2.code, c2.description, r.rate
+            ORDER BY r.rate DESC
+
+            # Now answer this question:
+            Question: {question}
+            """
+        )
+
+        self.llm = AzureChatOpenAI(
+            openai_api_key=config["azure_openai"]["api_key"],
+            openai_api_version=config["azure_openai"]["api_version"],
+            azure_endpoint=config["azure_openai"]["endpoint"],
+            deployment_name=config["azure_openai"]["deployment_name"],
+            temperature=0
+        )
+
+        self.graph = Neo4jGraph(
+            url=config["neo4j"]["uri"],
+            username=config["neo4j"]["user"],
+            password=config["neo4j"]["password"]
+        )
+
+        self.chain = GraphCypherQAChain.from_llm(
+            graph=self.graph,
+            llm=self.llm,
+            cypher_prompt=self.prompt_template,
+            verbose=True,
+            allow_dangerous_requests=True
+        )
+
+    def ask(self, question: str) -> str:
+        """Runs the agent with a given question."""
+        return self.chain.invoke(question)
+
+
+# === Graph ETL Functions ===
+
 def get_currency_list() -> List[Dict[str, str]]:
     url = "https://api.frankfurter.app/currencies"
     try:
@@ -130,52 +183,8 @@ if __name__ == "__main__":
 
     graph.close()
 
-    # === LangChain Agent Query ===
-    FEW_SHOT_PROMPT = """
-    # Please ALWAYS assign the exchange relationship to a variable (e.g., [r:EXCHANGE_TO])
-    # so that you can access properties like r.rate in the RETURN clause.
-
-    # Examples
-    # Question: What is the exchange rate from USD to other currencies?
-    MATCH (c1:Currency {{code: 'USD'}})-[r:EXCHANGE_TO]->(c2:Currency)
-    RETURN c2.code, r.rate
-
-    # Question: Which currencies have the highest exchange rate from EUR?
-    MATCH (c1:Currency {{code: 'EUR'}})-[r:EXCHANGE_TO]->(c2:Currency)
-    RETURN c2.code, c2.description, r.rate
-    ORDER BY r.rate DESC
-
-    # Now answer this question:
-    Question: {question}
-    """
-
-    cypher_prompt = PromptTemplate(
-        input_variables=["question"],
-        template=FEW_SHOT_PROMPT
-    )
-
-    llm = AzureChatOpenAI(
-        openai_api_key=config["azure_openai"]["api_key"],
-        openai_api_version=config["azure_openai"]["api_version"],
-        azure_endpoint=config["azure_openai"]["endpoint"],
-        deployment_name=config["azure_openai"]["deployment_name"],
-        temperature=0
-    )
-
-    neo4j_langchain_graph = Neo4jGraph(
-        url=config["neo4j"]["uri"],
-        username=config["neo4j"]["user"],
-        password=config["neo4j"]["password"]
-    )
-
-    chain = GraphCypherQAChain.from_llm(
-        graph=neo4j_langchain_graph,
-        llm=llm,
-        cypher_prompt=cypher_prompt,
-        verbose=True,
-        allow_dangerous_requests=True
-    )
-
-    # Sample query to test
-    response = chain.invoke("Which currencies have the lowest exchange rate from EUR?")
+    # Run sample LangChain question
+    agent = CurrencyQAAgent(config)
+    question = input("Enter your question: ")
+    response = agent.ask(question)
     print("Answer:", response)
